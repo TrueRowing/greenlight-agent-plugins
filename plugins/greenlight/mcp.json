@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "greenlight": {
+      "url": "https://greenlight.hydrow-internal.net/mcp"
+    }
+  }
+}

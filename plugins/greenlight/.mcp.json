@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "greenlight": {
+      "type": "http",
+      "url": "https://greenlight.hydrow-internal.net/mcp",
+      "alwaysLoad": true
+    }
+  }
+}
