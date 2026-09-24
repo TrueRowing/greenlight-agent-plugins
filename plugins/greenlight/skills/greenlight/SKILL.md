@@ -216,12 +216,19 @@ OAuth clients refresh unreliably; the CLI refreshes its own credential, so the s
 succeeds through it.
 
 **Sign the CLI in** — if `greenlight whoami` fails, run `greenlight login` and follow its output.
-It prints an approval URL + code and returns immediately; re-running it resumes the same request
-and waits briefly for the approval to land, so `auth.approval_pending` is progress, never an
-error. If the human is taking a while, stop re-running: either start one background
-`greenlight login --wait` (only if your environment notifies you when a background command
-finishes — it exits the moment they approve) or ask them to say when they have approved, then run
-`login` once more.
+That is the only sign-in command. It tries the person's own default browser first: the CLI opens
+that browser itself, and one already signed in to Greenlight finishes the whole thing in seconds
+with nothing for anyone to type or read. **Never load a sign-in URL yourself — not the authorize
+URL, not `/cli/approve` — in your own preview pane or embedded browser tool.** Yours holds none of
+the person's cookies, so it strands them on an SSO wall in a window they are not even looking at;
+the CLI already reached the browser they are actually using. When no browser could be reached,
+`login` prints an approval URL + code and returns immediately: hand the person both, then re-run
+`login` to collect the credential, so `auth.approval_pending` is progress, never an error. If the
+human is taking a while, stop re-running: either start one background `greenlight login --wait`
+(only if your environment notifies you when a background command finishes — it exits the moment
+they approve) or ask them to say when they have approved, then run `login` once more. **Do not pass
+`--loopback`** — plain `login` already tries the local browser, while `--loopback` removes the code
+fallback and blocks for five minutes, which wedges you on any machine with no browser to open.
 
 **CLI ↔ MCP equivalence** — builder goals, callable from either surface:
 
@@ -512,6 +519,7 @@ workloads:
     routes: ['/*']
     # omit compute: — baseline (25m/128Mi req, 500m/512Mi lim) fits most apps.
     # Declaring compute sets request=limit and reserves that capacity even when idle.
+    # Above 250m / 512Mi (org-tunable) raises a warn-level advisory; size on measured usage.
     # Add only after evidence (OOMKilled → memory; CPU throttle / slow starts → cpu).
     # Caps are org-set (default cpu<=2, memory<=4Gi). See Packaging → Sizing compute.
 
@@ -786,9 +794,11 @@ and route. The contract (some items pipeline-enforced, others recommended):
 - **Sizing compute.** Every app namespace has a `ResourceQuota` ceiling you neither set nor see —
   Greenlight sizes it to admit any workload up to the org compute cap (default cpu 2 / memory 4Gi),
   including the extra pod a rolling update runs. **Start with no `compute:` block** — the baseline
-  (25m CPU / 128Mi memory requests, 500m / 512Mi limits) fits static UIs and typical Node/Python
-  APIs. Declaring `compute:` sets **request = limit** (Guaranteed QoS), so a copy-pasted
-  `500m`/`512Mi` reserves half a core even when the app is idle. Raise only on evidence —
+  (25m CPU / 128Mi memory requests, 500m / 512Mi limits) is right for almost every app: static UIs
+  and typical Node/Python APIs alike. Declaring `compute:` sets **request = limit** (Guaranteed
+  QoS), so the value you write is **reserved against the cluster for as long as the app is
+  deployed, whether the app uses it or not** — a copy-pasted `500m`/`512Mi` holds half a core while
+  the app idles, and nobody else can schedule it. Raise only on evidence —
   `OOMKilled` (raise `memory`), sustained CPU throttling or slow responses (raise `cpu`), a cold
   start failing the readiness probe — one step at a time:
 
@@ -797,6 +807,16 @@ and route. The contract (some items pipeline-enforced, others recommended):
   | Static / mostly client UI                    | omit `compute:` (or `cpu: 25m` / `memory: 128Mi` if you must set it) |
   | Typical API + light DB                       | omit `compute:`                                                      |
   | Heavier server work (PDF, scraping, fan-out) | `cpu: 100m–250m` / `memory: 256Mi–512Mi`                             |
+
+  **A `compute:` block is justified by a measured need, never by what a neighbouring repo declares.**
+  Copying one propagates a reservation nobody sized. Above `cpu: 250m` or `memory: 512Mi` the run
+  raises `manifest.workload_compute_advisory` — a warning, not a blocker: it never stops a merge,
+  and it reaches the human who has to justify the number. Those are the defaults; an org can move
+  them, so read its configured `workload_compute_advisory` caps from `getPolicies` rather than
+  trusting the numbers here — an untuned org carries no `config` on that check, which means the
+  defaults above are in force. Check the size against reality with `getMetrics(app_id)`, which
+  returns `cpu_reserved_m` / `cpu_used_m` and `memory_reserved_mb` / `memory_usage_mb`; if usage
+  sits far under the reservation, lower it.
 
   Any value within the cap always deploys; a value above it is rejected at PR time
   (`POLICY_VIOLATION`, `workload-compute-limit`), never at runtime. Full reference:
@@ -882,8 +902,8 @@ surrounding Greenlight manifest, env, local-development, delivery, and verificat
 ### Connected databases
 
 Before discovering a schema, writing a query, or handling a connected-database error, read the
-bundled [connected-databases skill](../connected-databases/SKILL.md) in full. It owns the Azure SQL
-query route, parameterization, result limits and conversion, session isolation, paging, write
+bundled [connected-databases skill](../connected-databases/SKILL.md) in full. It owns the
+connected-database query route, parameterization, result limits and conversion, session isolation, paging, write
 ambiguity, and retry contract. Keep following this core skill for the surrounding Greenlight grant,
 Knowledge, local-development, delivery, and verification workflow.
 
@@ -1044,7 +1064,7 @@ Use these tools together:
   must log handler errors for this to help: a 500 that only returns JSON to the client leaves
   nothing in the pod log.
 - `getApp({ app_id })` — deployed state, grant/resource status, latest pipeline result.
-- `getMetrics({ app_id })` — recent CPU, memory, restart counts to spot resource pressure.
+- `getMetrics({ app_id })` — recent CPU, memory, restart counts, requests/min, and 4xx/5xx error percent, to spot resource pressure or a failing endpoint.
 
 Verifying is for _you_; putting the result in front of the citizen developer is the separate,
 equally required step — see _Show your work_.
