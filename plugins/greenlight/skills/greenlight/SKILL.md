@@ -198,17 +198,24 @@ shape, a non-obvious symbol/ID lookup, a data-model quirk — **write it back wi
 into durable context and is how integration Knowledge gets seeded in practice. Propose facts you
 verified by actually calling the API, not assumptions.
 
-**Look at real data before you write code against it.** Two MCP tools run inside Greenlight against
+**Look at real data before you write code against it.** Three MCP tools run inside Greenlight against
 the vaulted credential and hand you only the result, never the credential:
 
 - `inspectIntegrationApi({ app_id?, integration, method, path, query?, headers?, body? })` makes one
   HTTP call to a granted proxied integration and returns `{ status, headers, body, encoding,
 truncated }`. Omit `app_id` to use your own personal grant. `inspect.not_inspectable` means the
-  integration has no inspection path (injected delivery, a connected database); `inspect.not_implemented`
+  integration has no HTTP inspection path (injected delivery, or a connected database, which has
+  `inspectIntegrationDb`); `inspect.not_implemented`
   means its auth mode is not covered yet. For either, fall back to the provider's docs, a
   `greenlight run`, or fixtures.
 - `inspectAppDb({ app_id, statement, params? })` runs one read-only SQL statement against the app's
   own Postgres and returns columns plus up to 200 rows.
+- `inspectIntegrationDb({ app_id?, integration, statement, params? })` runs one T-SQL statement
+  against a granted connected database (Azure SQL, Fabric) and returns columns plus up to 200 rows.
+  It is for reading schema and data, not for changing them: ordinary writes are rolled back, but
+  `COMMIT`s in the statement can make them stick, so never put `BEGIN`/`COMMIT`/`ROLLBACK` in it
+  (`inspect.transaction_control`). Omit `app_id` to use
+  your own personal grant. See the `connected-databases` skill.
 
 Loop: inspect to learn the real shape (response fields, pagination, error bodies, table columns),
 write the code against what you saw, then `knowledgePropose` what the next session would otherwise
@@ -239,8 +246,13 @@ with nothing for anyone to type or read. **Never load a sign-in URL yourself —
 URL, not `/cli/approve` — in your own preview pane or embedded browser tool.** Yours holds none of
 the person's cookies, so it strands them on an SSO wall in a window they are not even looking at;
 the CLI already reached the browser they are actually using. When no browser could be reached,
-`login` prints an approval URL + code and returns immediately: hand the person both, then re-run
-`login` to collect the credential, so `auth.approval_pending` is progress, never an error. If the
+`login` prints an approval URL + code and returns immediately: hand the person both, with the
+output's own line that they must approve in a browser already signed in to Greenlight before the
+code expires (10 minutes), then re-run `login` to collect the credential, so
+`auth.approval_pending` is progress, never an error. A scheduled or unattended run has no one to
+approve in time, so sign the CLI in during an attended session on the machine the run will use:
+the stored credential then refreshes itself for about 90 days from sign-in. Once `whoami`
+reports the session expired, sign in again during an attended session. If the
 human is taking a while, stop re-running: either start one background `greenlight login --wait`
 (only if your environment notifies you when a background command finishes — it exits the moment
 they approve) or ask them to say when they have approved, then run `login` once more. **Do not pass
@@ -261,9 +273,12 @@ fallback and blocks for five minutes, which wedges you on any machine with no br
 | Open / merge a PR                                             | `createPullRequest` / `mergePullRequest`                                  | `pr open` / `pr merge`                          |
 | Pipeline status (`--wait` to poll, `detail: 'full'` to debug) | `getPipelineRun`                                                          | `pipeline --app <id> …`                         |
 | Pod logs                                                      | `getLogs`                                                                 | `logs --app <id>`                               |
+| Why a deployed app is failing (one snapshot)                  | `getAppDiagnostics`                                                       | `diagnostics --app <id>`                        |
 | Verify a deployed response                                    | `curlApp`                                                                 | `curl --app <id> --path <p>`                    |
 | Metrics (point / series)                                      | `getMetrics` / `getMetricsSeries`                                         | `metrics` / `metrics series --app <id>`         |
-| Inspect a granted integration / the app's own Postgres        | `inspectIntegrationApi` / `inspectAppDb`                                  | —                                               |
+| Inspect a granted integration / the app's own Postgres        | `inspectIntegrationApi` / `inspectAppDb`                                  | `inspect api` / `inspect db`                    |
+| Read the checks the pipeline gate enforces                    | `getPolicies`                                                             | `policies`                                      |
+| Inspect a granted connected database                          | `inspectIntegrationDb`                                                    | `inspect integration-db --integration <slug> …` |
 | Knowledge (read / propose)                                    | `knowledgeList` / `knowledgeGet` / `knowledgeSearch` / `knowledgePropose` | `knowledge list` / `get` / `search` / `propose` |
 | Brand assets — the real logo/icon, never invented             | `knowledgeAssetList` / `knowledgeAssetGet`                                | `knowledge asset list` / `knowledge asset get`  |
 | Clone the repo (minted token)                                 | `getRepoAccess`                                                           | `repo clone --app <id>`                         |
@@ -279,7 +294,7 @@ detail from `greenlight help` or `greenlight <command> --help` — never guess.
 
 **Write payloads use stdin/file, never argv.** Env values and Markdown/PR bodies can contain
 secrets or multiline text, so the CLI refuses `--value` and `--body`. Required payloads (`env set`,
-`knowledge propose`, `feedback`) read a piped value. Optional ones (`curl`, `pr open`) ignore stdin
+`knowledge propose`, `feedback`) read a piped value. Optional ones (`curl`, `inspect api`, `pr open`) ignore stdin
 unless you pass `--body-file -`:
 
 ```bash
@@ -1070,7 +1085,7 @@ Use these tools together:
   bodies on the CLI come from `--headers-file` / `--body-file` (`-` for stdin), never argv.
   Platform admins may use `as_user` / `--as-user` to reproduce another same-org user's view; the
   selected user must still have access to the app. On `app.unreachable`, inspect `details.hit_app`, then check
-  `getApp` and `getLogs` before retrying; other roles must not impersonate.
+  `getAppDiagnostics` and `getLogs` before retrying; other roles must not impersonate.
 - **`getAppPreviewUrl({ app_id, path? })` — or `greenlight preview --app <id> [--path <p>]` — for
   browser behavior.** Mints a one-time URL you open in your own browser tool (IDE
   preview pane, Playwright, any headless browser). It signs you in through the SSO boundary with no
@@ -1086,6 +1101,14 @@ Use these tools together:
   curl, a plain HTTP fetch, or a WebFetch-style tool: it drops the cookie, lands on the SSO login
   page, and burns the token. Use `curlApp` for response-level checks; if a non-browser tool touches
   a preview URL, mint a new one.
+- `getAppDiagnostics({ app_id })` — or `greenlight diagnostics --app <id>` — **the first read when a
+  deployed app misbehaves.** One snapshot: pod phase, readiness, restarts and the last exit (OOM
+  included), probe failures, each env name as `ok` / `missing` / `stale` (never values),
+  reachability of the app's database, data proxy, and injected integrations, whether the pod runs
+  the last-merge image, and the `rollout_blocker` the deploy check would report. Act on it before
+  changing code: a `missing` name needs `envSet` or an approved grant, a `stale` one needs a merge
+  to roll it, and a blocker with `owner: "operator"` is IT's to fix, so stop editing app code and
+  tell the citizen developer.
 - `getLogs({ app_id, since?, filter? })` — bounded pod stdout/stderr with crash-loop context. Apps
   must log handler errors for this to help: a 500 that only returns JSON to the client leaves
   nothing in the pod log.
