@@ -16604,6 +16604,8 @@ var GROUP_POLL_MS = 50;
 var INTEGRATION_LABEL = {
   live_raw: "live (raw, injected)",
   live_proxy: "live (proxy token)",
+  live_passthrough: "live as you (your connected account)",
+  connect_required: "not connected yet \u2014 calls answer 401 until you connect",
   fixtures_user_delegated: "fixtures (user-delegated)",
   denied_group_requirement: "denied (not in a required group)"
 };
@@ -16658,6 +16660,16 @@ function formatSummary(contract) {
   }
   return lines;
 }
+function needsLocalProxyToken(integrations) {
+  return integrations.some(
+    (i) => ["live_proxy", "live_passthrough", "connect_required"].includes(i.local)
+  );
+}
+function formatConnectLinks(integrations) {
+  return integrations.flatMap(
+    (i) => i.local === "connect_required" && i.connect_url !== void 0 ? [`Connect your ${i.integration} account to call it as yourself: ${i.connect_url}`] : []
+  );
+}
 function parseRunContract(body) {
   const record2 = asRecord(body);
   const appSlug = record2["app_slug"] ?? null;
@@ -16681,7 +16693,15 @@ function asIntegrations(value) {
   if (!Array.isArray(value)) return [];
   return value.flatMap((entry2) => {
     const r = asRecord(entry2);
-    return typeof r["integration"] === "string" && typeof r["local"] === "string" ? [{ integration: r["integration"], local: r["local"] }] : [];
+    if (typeof r["integration"] !== "string" || typeof r["local"] !== "string") return [];
+    const connectUrl = r["connect_url"];
+    return [
+      {
+        integration: r["integration"],
+        local: r["local"],
+        ...typeof connectUrl === "string" ? { connect_url: connectUrl } : {}
+      }
+    ];
   });
 }
 function asResources(value) {
@@ -16857,7 +16877,7 @@ async function cmdRun(apiBase, opts, devCommand) {
   const res = await jsonRequest("POST", `${apiBase}/api/cli/run-context`, { token, body });
   ensureOk(res, "Could not resolve the run contract");
   const contract = parseRunContract(res.body);
-  const needsProxyToken = (contract.integrations ?? []).some((i) => i.local === "live_proxy") || (contract.resources ?? []).some((r) => r.kind === "blob" && r.local !== "pending");
+  const needsProxyToken = needsLocalProxyToken(contract.integrations ?? []) || (contract.resources ?? []).some((r) => r.kind === "blob" && r.local !== "pending");
   if (needsProxyToken) {
     const minted = await jsonRequest("POST", `${apiBase}/api/cli/proxy-token`, { token, body });
     ensureOk(minted, "Could not mint the local proxy token");
@@ -16882,6 +16902,9 @@ async function cmdRun(apiBase, opts, devCommand) {
 [greenlight] run \u2014 ${contract.app_slug ?? "your granted integrations (user mode)"} (local)`
   );
   for (const line of formatSummary(contract)) note(`[greenlight]${line}`);
+  for (const line of formatConnectLinks(contract.integrations ?? [])) {
+    note(`[greenlight] ${line}`);
+  }
   note(`[greenlight] Credentials valid until ${contract.expires_at}.
 `);
   return spawnChild(devCommand, contract);
@@ -17313,6 +17336,26 @@ var MCP_COMMANDS = {
         type: "string",
         describe: "The app's Postgres resource (defaults to its primary database)."
       }
+    }
+  },
+  "inspect blob": {
+    tool: "inspectAppBlob",
+    summary: "List or head objects in the app's own blob storage (metadata only, never contents).",
+    flags: {
+      app: appRequired,
+      action: {
+        field: "action",
+        type: "enum",
+        enumValues: ["list", "head"],
+        required: true,
+        describe: "list | head."
+      },
+      prefix: {
+        field: "prefix",
+        type: "string",
+        describe: "list: narrow to keys starting with this string."
+      },
+      key: { field: "key", type: "string", describe: "head: the relative key of one object." }
     }
   },
   "inspect integration-db": {

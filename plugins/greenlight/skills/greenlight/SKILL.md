@@ -198,7 +198,7 @@ shape, a non-obvious symbol/ID lookup, a data-model quirk — **write it back wi
 into durable context and is how integration Knowledge gets seeded in practice. Propose facts you
 verified by actually calling the API, not assumptions.
 
-**Look at real data before you write code against it.** Three MCP tools run inside Greenlight against
+**Look at real data before you write code against it.** Four MCP tools run inside Greenlight against
 the vaulted credential and hand you only the result, never the credential:
 
 - `inspectIntegrationApi({ app_id?, integration, method, path, query?, headers?, body? })` makes one
@@ -207,9 +207,15 @@ truncated }`. Omit `app_id` to use your own personal grant. `inspect.not_inspect
   integration has no HTTP inspection path (injected delivery, or a connected database, which has
   `inspectIntegrationDb`); `inspect.not_implemented`
   means its auth mode is not covered yet. For either, fall back to the provider's docs, a
-  `greenlight run`, or fixtures.
+  `greenlight run`, or fixtures. On a user passthrough integration the call runs as the developer;
+  `inspect.user_connection_required` means they have not connected yet: ask them to open
+  `details.connect_url`, then rerun.
 - `inspectAppDb({ app_id, statement, params? })` runs one read-only SQL statement against the app's
   own Postgres and returns columns plus up to 200 rows.
+- `inspectAppBlob({ app_id, action: "list" | "head", prefix?, key? })` lists up to 200 objects in
+  the app's own blob storage, or heads one by `key`, and returns each object's key, size, content
+  type, and last-modified time. It never returns file contents: they are the app users' uploads.
+  To debug one file's contents, use a `greenlight run` or a fixture.
 - `inspectIntegrationDb({ app_id?, integration, statement, params? })` runs one T-SQL statement
   against a granted connected database (Azure SQL, Fabric) and returns columns plus up to 200 rows.
   It is for reading schema and data, not for changing them: ordinary writes are rolled back, but
@@ -277,6 +283,7 @@ fallback and blocks for five minutes, which wedges you on any machine with no br
 | Verify a deployed response                                    | `curlApp`                                                                 | `curl --app <id> --path <p>`                    |
 | Metrics (point / series)                                      | `getMetrics` / `getMetricsSeries`                                         | `metrics` / `metrics series --app <id>`         |
 | Inspect a granted integration / the app's own Postgres        | `inspectIntegrationApi` / `inspectAppDb`                                  | `inspect api` / `inspect db`                    |
+| List or head the app's own stored files (metadata only)       | `inspectAppBlob`                                                          | `inspect blob --app <id> --action list`         |
 | Read the checks the pipeline gate enforces                    | `getPolicies`                                                             | `policies`                                      |
 | Inspect a granted connected database                          | `inspectIntegrationDb`                                                    | `inspect integration-db --integration <slug> …` |
 | Knowledge (read / propose)                                    | `knowledgeList` / `knowledgeGet` / `knowledgeSearch` / `knowledgePropose` | `knowledge list` / `get` / `search` / `propose` |
@@ -360,7 +367,7 @@ The standard new-app loop:
 6. **Wait, then merge.** Poll `getPipelineRun` (`greenlight pipeline --pr <n> --wait`) with
    `pull_request_number` and `wait: true`. Once it returns `passed`, take its `commit_sha` and merge
    through Greenlight with `mergePullRequest({ app_id, pull_request_number, expected_head_sha:
-commit_sha })` or `greenlight pr merge` — **never** `gh pr merge` or the GitHub API. Merge fails
+commit_sha })` or `greenlight pr merge --app <id> --pr <n> --head-sha <commit_sha>` — **never** `gh pr merge` or the GitHub API. Merge fails
    closed if the PR has moved past that SHA (a new push landed) or that SHA hasn't passed; re-poll
    `getPipelineRun` on the new head and retry. If it fails with `scm.branch_behind`, `main` moved
    on after you branched (another PR landed, or Greenlight updated the generated workflow): merge
@@ -392,8 +399,8 @@ One-paragraph description of what this app does.
 ## Quick Start
 1. Clone the repo
 2. Install dependencies: `npm install` (or the stack equivalent)
-3. Set up environment: `greenlight run` supplies real values for granted credentials; for
-   user-delegated sources write your own `.env` fixtures
+3. Set up environment: `greenlight run` supplies real values for granted credentials and acts as
+   you on user passthrough integrations, once you connect through the link it prints
 4. Run the dev server: `greenlight run -- npm run dev` (or plain `npm run dev` with fixtures)
 
 ## Commands
@@ -524,7 +531,10 @@ the grant is the gate. At MVP:
   through the unchanged grant-check + credential-swap + audit path. No upstream secret on the
   laptop.
 - **Granted injected integration** → the real credential, in-process. Live.
-- **User-delegated integration** → no laptop actor token exists; author a fixture.
+- **User passthrough integration** (Microsoft Graph as the signed-in person) → live as the
+  developer, through the same minted token; `greenlight run` prints a connect link for each one
+  they have not connected yet (see _User passthrough integrations_ under _Reaching company
+  data_).
 - **App's own Postgres** → a local fixture database; `DATABASE_URL` is not injected locally.
 - **Blob** → the [storage skill](../storage/SKILL.md) copy-in client against the proxy
   (`GREENLIGHT_PROXY_URL` + the minted `purpose: 'local'` token). No `STORAGE_*` credential is
@@ -573,6 +583,7 @@ grants: # integration access requests; one entry max per integration
   - integration: <integration-name> # use the real integration names the user/org provides
     credential: <slug> # the credential to bind, by its slug (e.g. crm-readonly); IT registers the slugs — discover integrations and their slugs with listGrantableIntegrations. Not a fixed read/write/access enum.
     reason: Read CRM accounts to prefill expense categories.
+    # user_connection: optional — only on a user passthrough integration (auth_mode user_delegated). Omit it (required) to connect each person before the app renders; optional lets the app render first and send people to connect_url when it needs them.
 
 env: # names only; values go through envSet
   - { name: APPROVAL_SECRET, sensitive: true }
@@ -610,8 +621,9 @@ Grants are request signals, not merge blockers: an auto-approved grant works the
 merges; an IT-required grant deploys in `pending` and the proxy returns `403` for it until IT
 approves out of band (no redeploy needed). Watch grant status in `getApp`.
 
-**The provisioned `postgres` resource is Azure Database for PostgreSQL (v16), and `CREATE
-EXTENSION` is not allow-listed for app users** — a migration that runs
+**The provisioned `postgres` resource is a managed PostgreSQL 16 server — Azure Database for
+PostgreSQL on Azure, Cloud SQL on GCP, RDS on AWS — and `CREATE EXTENSION` is not allowed for app
+users** — a migration that runs
 `CREATE EXTENSION pgcrypto` (or `uuid-ossp`) passes the build and then crash-loops the pod on
 first boot. Write schemas that need no extensions: `gen_random_uuid()` is built into Postgres 16
 core (no pgcrypto required), or generate ids in app code (`crypto.randomUUID()`).
@@ -749,6 +761,26 @@ rejects them as reserved.
 | a `grants:` entry for an **injected** integration | that integration's credential, under its own fixed env-var name                    |
 | an `ai_*` grant _(post-MVP)_                      | `GREENLIGHT_AI_KEY`, `GREENLIGHT_AI_BASE_URL`                                      |
 | always (a `web` workload)                         | `PORT`                                                                             |
+
+**Connect to Postgres with `DATABASE_URL` exactly as injected — it already carries the TLS
+settings.** On GCP it reads `sslmode=verify-ca&sslrootcert=/etc/greenlight/db-server-ca.pem`: the
+server certificate is verified against the mounted Cloud SQL CA, and the hostname is not checked
+because the pod reaches the database by private IP, which the certificate never names. That is the
+platform's supported posture, not a TLS weakening. libpq-based clients (psycopg, `psql`) honor it
+as-is. Node's `pg` treats `verify-ca` as `verify-full` and fails with
+`ERR_TLS_CERT_ALTNAME_INVALID` unless the connection string also carries `uselibpqcompat=true` —
+add it in app code, inside the string (a `useLibpqCompat` constructor option does not reach the
+parser):
+
+```js
+const url = new URL(process.env.DATABASE_URL);
+if (url.searchParams.get('sslmode') === 'verify-ca') url.searchParams.set('uselibpqcompat', 'true');
+const pool = new Pool({ connectionString: url.toString() });
+```
+
+Do not add an `ssl` object, read `DATABASE_SERVER_CA_CERT` yourself, set
+`rejectUnauthorized: false`, or pin a `servername`. On Azure the string carries
+`sslmode=require`; pass it unchanged.
 
 **Blob access is a focused Skill.** When the manifest declares `kind: blob`, read the bundled
 [storage skill](../storage/SKILL.md) in full before writing object I/O. It owns the copy-in client,
@@ -908,6 +940,17 @@ A granted integration reaches its upstream one of two ways, set per-integration 
 
 Either way, never hardcode or commit a credential.
 
+**Decide whose identity each feature acts as, and ask when the request leaves it open.** Many
+systems can be reached two ways: as the person using the app (a user passthrough integration,
+`auth_category: user-delegated`, which sees only what that person can) or as the app itself (a
+service-identity integration, which sees what IT granted the app). The same upstream is often
+registered both ways. The choice decides whose name is on the result, what data comes back, and
+whether the feature works with nobody signed in. When the request does not say ("send an email",
+"pull the sales numbers"), ask one plain question before writing code, for example: "Should
+these emails come from each person's own mailbox, or from a shared address like alerts@?" Work
+with nobody signed in can only act as the app; a feature that shows a person their own data
+should act as them.
+
 ### Preserve user attribution
 
 Greenlight injects an opaque `X-Greenlight-Actor-Token` header into every authenticated request
@@ -931,6 +974,65 @@ Treat the token as opaque and request-scoped: never inspect, log, store, or reus
 request that carried it — reuse misattributes data access. Background work (startup tasks, timers,
 queue consumers, scheduled jobs) has no user and no token: workload attribution is the correct
 outcome there, so never mint or replay a token for it.
+
+### User passthrough integrations: acting as the signed-in person
+
+Some integrations reach the upstream **as the person using the app** rather than as a shared
+service identity — Microsoft Graph (mail, calendar, files, directory as the user), Microsoft
+Fabric (the REST API and the API for GraphQL under the person's own workspace role), Power BI
+semantic models (DAX with the model's row-level security), Box (files and folders the person
+can open, with no connect step), and a Fabric Warehouse connected
+database (SQL as the person; the [connected-databases skill](../connected-databases/SKILL.md)
+covers its `/query` route). `listGrantableIntegrations` shows the HTTP ones
+with `auth_category: user-delegated`. A Fabric Warehouse lists as
+`auth_category: connected-database` like any connected database. Each one's `usage_note` says it
+acts as the signed-in user, then gives that upstream's own calling instructions: paths, paging,
+limits, and errors. Read it before writing calls.
+Rules, in order:
+
+1. **Implement no OAuth.** No redirect, no callback, no consent screen, no token storage.
+   Greenlight connects each person to the upstream before the app renders and refreshes their
+   token for them.
+2. **Send the data key and the actor token exactly as received** on every proxy call made while
+   serving a user request — `Authorization: Bearer $GREENLIGHT_DATA_KEY` plus the forwarded
+   `X-Greenlight-Actor-Token`, as above. The proxy swaps them for that person's own upstream
+   token, so the upstream sees that person and enforces their permissions.
+3. **Call the proxy as you would call the upstream** — same paths, same bodies, under
+   `${GREENLIGHT_PROXY_URL}/<integration>/…`, as the integration's `usage_note` describes. **Rewrite
+   absolute paging links** onto the proxy base URL; following one directly leaves the proxy and
+   fails with no token. A `429` arrives with `Retry-After`: wait that long and retry — the proxy
+   does not retry for you. A download that answers `302` to a short-lived pre-authenticated URL is
+   followed without a token and never logged.
+4. **Handle the two "not connected" answers.** `401 proxy.user_connection_required` comes from
+   the proxy when the grant is `user_connection: optional` and the person has not connected, or
+   when their stored token stopped working while the page was open; a fetch from the app's own
+   front end can instead get `401 auth.user_connection_required` from `/auth/check`. Both carry
+   the link in `details.connect_url`. Either way, send the person there and retry once they
+   return — never with another identity. Once connected, the proxy's link brings the person
+   back to your app's home page; to bring them back to the page they were on, set its
+   `return_to` to that page's absolute URL. The link from `/auth/check` already returns them to
+   the page they opened. `403 proxy.upstream_user_unmapped` means the upstream has no account
+   for the person; show `next_steps` and stop, since only IT can fix it.
+5. **What you read as one person, you show only to that person.** The upstream's own
+   permissions (a mailbox, row-level security on a Fabric model, a database role) are the
+   boundary, and your copy keeps it: key any cache or table you fill from these calls by the
+   `X-User-Id` the rows were read as, never pool several people's results into one shared table,
+   and never answer one person's request with rows read as another. Work for a group of people
+   runs once per person, as each of them; a view across people needs a service-identity
+   integration IT granted for that purpose.
+6. **The actor token is read from the request and never stored, queued, or reused.**
+7. **No background work.** A user passthrough integration refuses any call with no present
+   person, so scheduled, queued, or startup work cannot use it. Work that must run with nobody
+   signed in binds a separate service-identity credential and grant, and no feature may assume
+   the app can act for a person who is away.
+8. **Locally, the developer is the person.** `greenlight run` (either mode) and
+   `inspectIntegrationApi` call these integrations as the developer, with real effects: a local
+   send-mail sends from their own mailbox. No actor token exists or is needed locally. The first
+   time, `greenlight run` prints a connect link per integration and starts anyway; ask the
+   developer to open it, then retry, with no restart. `user_connection: required` gates nothing
+   locally, because no sign-in sits in front of a local process, so check the connect redirect on
+   the deployed app (`getAppPreviewUrl`; `curlApp` carries the actor token). Use fixtures when
+   real effects are unwanted.
 
 ### Blob storage
 
@@ -1032,7 +1134,7 @@ yourself. The governed change request then goes through MCP:
 - **Open** with `createPullRequest` **after your feature branch is pushed** — an unpushed branch
   has no commits to propose. Pass `app_id` and the head branch; Greenlight resolves the repo.
 - **Merge** with `mergePullRequest` only after you have observed a passing pipeline for the exact
-  head SHA — pass it as `expected_head_sha`; merge fails closed if the PR moved past it or that SHA
+  head SHA — pass it as `expected_head_sha` (CLI: `--head-sha`); merge fails closed if the PR moved past it or that SHA
   didn't pass, and with `scm.branch_behind` if `main` moved on since you branched. Direct pushes to
   `main` are blocked by branch protection.
 
