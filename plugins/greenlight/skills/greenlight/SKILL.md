@@ -858,13 +858,13 @@ and route. The contract (some items pipeline-enforced, others recommended):
   images build, push, and pull faster; identical bases mean the registry and nodes already hold
   those layers, so later builds and deploys hit cache. Don't invent a bespoke base per app.
   Defaults by runtime (override only when the org says so):
-  - **Node:** `node:20-alpine` (or `node:22-alpine`).
+  - **Node:** `node:26-alpine`.
   - **Static / SPA / reverse proxy:** `nginxinc/nginx-unprivileged:alpine` — already non-root and
     `/tmp`-friendly under the security posture below (plain `nginx:alpine` needs the `/tmp` tweaks).
-  - **Python:** `python:3.12-slim` (Debian slim), **not** `python:3.12-alpine` — musl forces many
+  - **Python:** `python:3.14-slim` (Debian slim), **not** `python:3.14-alpine` — musl forces many
     wheels to recompile from source, so slim is the faster, more reliable default.
   - **Go / Rust / other compiled:** multi-stage build, static binary copied into
-    `gcr.io/distroless/static` or `alpine:3.20`.
+    `gcr.io/distroless/static` or `alpine:3.24`.
 
   Keep deps in their own layer (copy lockfiles and install _before_ copying source) so an unchanged
   dependency set stays cached across builds.
@@ -954,6 +954,18 @@ A national open-data portal, a public patent register, or a published statistica
 CRM, a ticketing system, a mailbox, or any API that wants a credential does not — those stay in
 _Reaching company data_, including when the company has not connected them yet. If
 `listGrantableIntegrations` already lists the source, use that grant instead of calling around it.
+
+**When the call fails on the certificate.** Some publishers serve their certificate without the
+intermediate that links it to a trusted root. Browsers fill the gap; Node does not, so `fetch` fails
+with `UNABLE_TO_VERIFY_LEAF_SIGNATURE` or `unable to get local issuer certificate`. Download the
+missing intermediate from the issuing CA (its URL is in the server certificate's Authority
+Information Access field; if it chains to a root Node does not ship, add the next certificate up the
+same way until it reaches one Node trusts), commit them to the app as one PEM file, and trust it
+for that call only: an
+undici `Agent` whose `connect.ca` is `[...tls.rootCertificates, pem]`, passed as `fetch`'s
+`dispatcher`, or `NODE_EXTRA_CA_CERTS` pointing at the file. Never set
+`NODE_TLS_REJECT_UNAUTHORIZED=0` or `rejectUnauthorized: false`: that turns off checking for every
+call the app makes.
 
 ## Reaching company data
 
