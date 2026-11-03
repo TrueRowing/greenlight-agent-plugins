@@ -1016,10 +1016,12 @@ await fetch(`${process.env.GREENLIGHT_PROXY_URL}/<integration>/...`, {
 });
 ```
 
-Treat the token as opaque and request-scoped: never inspect, log, store, or reuse it beyond the
-request that carried it — reuse misattributes data access. Background work (startup tasks, timers,
-queue consumers, scheduled jobs) has no user and no token: workload attribution is the correct
-outcome there, so never mint or replay a token for it.
+Treat the token as opaque: never inspect or log it, and never reuse it beyond the request that
+carried it — reuse misattributes data access. Background work (startup tasks, timers, queue
+consumers, scheduled jobs) has no user and no token: workload attribution is the correct outcome
+there, so never mint or replay a token for it. The one exception is scheduled work on a person's
+behalf through a user passthrough integration the app is granted, where the app keeps and replays
+that person's own token; the user-passthrough skill owns that rule.
 
 ### User passthrough integrations
 
@@ -1027,7 +1029,7 @@ Before writing a call that acts as the signed-in person (`auth_category: user-de
 Microsoft Graph, Microsoft Fabric, Power BI or Box), or handling
 `401 proxy.user_connection_required`, read the bundled
 [user-passthrough skill](../user-passthrough/SKILL.md) in full. It owns the calling rules, the
-per-person data rule, the no-background-work rule, local behaviour, and the Connect button every
+per-person data rule, the rule for scheduled work on a person's behalf, local behaviour, and the Connect button every
 such app shows instead of redirecting. Keep following this core skill for the surrounding grant,
 Knowledge, local-development, delivery, and verification workflow.
 
@@ -1053,6 +1055,15 @@ entry frequently won't exist. When it's absent, read the provider's own public A
 source to work out endpoints, params, and the auth slot yourself, confirm it against a real call
 (`inspectIntegrationApi` makes one without handing you the credential), and then `knowledgePropose` an integration-scope entry so the next agent doesn't repeat the dig
 (see _Starting from an idea_). Never fall back to hardcoded assumptions baked into this file.
+
+### Large data and performance
+
+Before building a list, summary, or chart over data that can grow past a few hundred rows, a CSV
+export, or a cache of upstream results — or when a deployed app is slow, fails to load its data,
+hits `429`, or hits the connected-database execution cap — read the bundled
+[performance skill](../performance/SKILL.md) in full. It owns aggregating in the source,
+server-side paging, caching, exports, and the platform limits those patterns are sized against. Keep following this core skill for the
+surrounding Greenlight grant, Knowledge, local-development, delivery, and verification workflow.
 
 ### The org user directory (`greenlight-directory`)
 
@@ -1142,6 +1153,11 @@ through Greenlight so it is audited and policy-gated.
 
 For new work, run `git -C <dir> checkout main && git -C <dir> pull origin main && git -C <dir> checkout -b feat/<change>`; when resuming, run `git -C <dir> checkout <feature-branch> && git -C <dir> fetch origin && git -C <dir> merge origin/main`.
 Merge rather than rebase; resolve conflicts and re-run the app locally before continuing.
+
+Greenlight owns `.github/workflows/greenlight.yml` and commits it to your open branch when its
+template changes, which starts a new pipeline run. If a push is then rejected because the remote
+branch has a commit you don't, run `git -C <dir> pull --no-rebase origin <feature-branch>` and push
+again. Never force-push: it deletes that commit and the next run fails on the old workflow.
 
 **Every `mergePullRequest` lands as a squash commit**, so after a merge your old feature branch's
 tip is _not_ an ancestor of `main`. Always cut the next branch from freshly pulled `origin/main`,
